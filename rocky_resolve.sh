@@ -1,20 +1,41 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# DaVinci Resolve Installer for Rocky Linux 10
 #
-# install_resolve_rocky10_from_zip_fixed_v6.sh
-# DaVinci Resolve installer for Rocky/RHEL 10 (NVIDIA) installing from ZIP in ~/Downloads.
-# v6: add libXt (fixes 'libXt.so.6' missing for USD.plugin), keep zlib-ng compatibility skip.
+# Installs DaVinci Resolve on Rocky Linux 10 with NVIDIA GPU support.
+# Handles the specific compatibility issues on RHEL-based systems:
+#   - zlib-ng-compat vs legacy zlib (Rocky 10 uses zlib-ng which confuses
+#     Resolve's package checker — we bypass it with SKIP_PACKAGE_CHECK)
+#   - GLib/Pango library conflicts (same issue as Arch/Mint — bundled
+#     versions conflict with system libraries)
+#   - libcrypt.so.1 compatibility symlink
+#   - libXt for USD plugin support
 #
+# Prerequisites:
+#   - Rocky Linux 10 with NVIDIA drivers installed (run NVIDIA_rocky.sh first)
+#   - DaVinci Resolve Linux ZIP downloaded to ~/Downloads/
+#
+# Usage:
+#   sudo ./rocky_resolve.sh
+# ==============================================================================
+
 set -Eeuo pipefail
+# -E: ERR traps inherited by functions/subshells
+# -e: Exit on error
+# -u: Error on unset variables
+# -o pipefail: Pipe fails if any command in it fails
 
 log() { echo -e "[resolve-install] $*"; }
 die() { echo -e "\e[31mERROR:\e[0m $*" >&2; exit 1; }
 
-# Root required
+# Root is required for installing packages and writing to /opt/resolve.
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   die "Please run as root (e.g., sudo -i && bash $0)"
 fi
 
-# Target user
+# Figure out the real user — when running with sudo, we need to find their
+# home directory to locate the Resolve ZIP in ~/Downloads/. Falls back to
+# the first user in /home/ if SUDO_USER isn't set (e.g. running as root directly).
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
   TARGET_USER="$SUDO_USER"
 else
@@ -28,7 +49,13 @@ RESOLVE_PREFIX="/opt/resolve"
 log "Target user: ${TARGET_USER}"
 log "Downloads folder: ${DOWNLOADS_DIR}"
 
-# Repos & deps
+# Install runtime dependencies that Resolve needs:
+#   xcb-util-cursor:   X11 cursor handling
+#   mesa-libGLU:       OpenGL Utility Library (3D rendering)
+#   libxcrypt-compat:  Legacy libcrypt.so.1 (Rocky 10 uses libxcrypt v2)
+#   zlib:              Compression library
+#   libXt:             X Toolkit library (fixes missing libXt.so.6 for USD plugin)
+#   libXrandr/etc:     X11 extensions for display management
 log "Enabling EPEL and installing required packages..."
 if ! rpm -q epel-release &>/dev/null; then
   dnf -y install epel-release || dnf -y install "https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm"
@@ -36,7 +63,11 @@ fi
 dnf -y install unzip xcb-util-cursor mesa-libGLU libxcrypt-compat zlib libXt || die "Failed to install required packages."
 dnf -y install libXrandr libXinerama libXcursor libXi fontconfig freetype || true
 
-# Determine if we need to bypass BM's package checker (legacy 'zlib' rpm name)
+# Rocky Linux 10 uses zlib-ng-compat instead of the legacy 'zlib' package.
+# zlib-ng is a drop-in replacement that provides the same libz.so.1 library,
+# but Resolve's built-in package checker looks for an RPM literally named
+# "zlib" and fails when it doesn't find it. Setting SKIP_PACKAGE_CHECK=1
+# tells the installer to skip this check.
 NEED_SKIP=0
 if ! rpm -q zlib &>/dev/null; then
   if rpm -q zlib-ng-compat &>/dev/null && [[ -e /usr/lib64/libz.so.1 || -e /lib64/libz.so.1 ]]; then
@@ -93,7 +124,11 @@ else
   fi
 fi
 
-# Post-install tweaks
+# Post-install library conflict resolution.
+# Resolve bundles old versions of GLib and Pango that conflict with the
+# system versions on Rocky 10. Moving them to a backup directory forces
+# Resolve to use the system libraries instead, which are newer and
+# compatible (stable C ABI). This fixes crashes and "symbol not found" errors.
 if [[ -d "${RESOLVE_PREFIX}/libs" ]]; then
   log "Applying GLib/Pango conflict workaround in ${RESOLVE_PREFIX}/libs ..."
   pushd "${RESOLVE_PREFIX}/libs" >/dev/null
@@ -111,7 +146,9 @@ else
   log "WARNING: ${RESOLVE_PREFIX}/libs not found. Was the install path different?"
 fi
 
-# libcrypt link
+# Create a symlink for libcrypt.so.1 inside Resolve's lib directory.
+# Rocky 10 provides this via libxcrypt-compat, but Resolve may not find
+# it in the system path due to its custom RPATH settings.
 if [[ -e /usr/lib64/libcrypt.so.1 ]]; then
   ln -sf /usr/lib64/libcrypt.so.1 "${RESOLVE_PREFIX}/libs/libcrypt.so.1" && \
     log "Linked /usr/lib64/libcrypt.so.1 into ${RESOLVE_PREFIX}/libs"
@@ -119,7 +156,9 @@ else
   log "WARNING: /usr/lib64/libcrypt.so.1 not found. libxcrypt-compat may not have installed correctly."
 fi
 
-# Logs + user dirs
+# Create Resolve's data directories with correct ownership. These store
+# projects, preferences, cache, and logs. They must be owned by the real
+# user (not root) since Resolve should be launched as a normal user.
 install -d -m 1777 "${RESOLVE_PREFIX}/logs"
 for d in \
   "${USER_HOME}/.local/share/DaVinciResolve" \
@@ -131,7 +170,8 @@ do
   chown -R "${TARGET_USER}:${TARGET_USER}" "$d" || true
 done
 
-# Sanity
+# Final sanity checks — verify that critical libraries are findable by the
+# dynamic linker. If these fail, Resolve will crash on launch.
 if ! ldconfig -p | grep -q "libGLU.so.1"; then
   die "libGLU.so.1 not found even after mesa-libGLU install."
 fi
