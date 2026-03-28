@@ -1,4 +1,4 @@
-# Rocky Linux Davinci resolve Setup
+# Rocky 10 Linux Davinci resolve Setup
 
 ## Video Guide
 
