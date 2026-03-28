@@ -1,5 +1,13 @@
 # Rocky Linux Setup
 
+## Video Guide
+
+<p align="center">
+  <a href="https://youtu.be/zV8yIiVKbZ4">
+    <img src="https://img.youtube.com/vi/zV8yIiVKbZ4/0.jpg" width="700">
+  </a>
+</p>
+
 Setup scripts for getting a Rocky Linux 10 workstation ready for video editing with DaVinci Resolve.
 
 Three scripts that should be run in order:
